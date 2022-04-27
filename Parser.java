@@ -1,0 +1,285 @@
+///usr/bin/env jbang "$0" "$@" ; exit $?
+//DEPS com.fasterxml.jackson.core:jackson-databind:2.13.0
+
+package org.jboss.fuse.maven;
+
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class Parser {
+
+    private Path dependencyTreeFile;
+
+    public Parser(final String dependencyTreeFilePath) {
+        dependencyTreeFile = Paths.get(dependencyTreeFilePath);
+    }
+
+    public static void main(String[] args) throws IOException {
+        final String dependencyTreeFile = "/home/federico/Work/build-from-source-statistics/input-test.txt"; //args[0];
+        final String outputFile = "/home/federico/Work/build-from-source-statistics/output-test.json"; //args[1];
+        final Parser parser = new Parser(dependencyTreeFile);
+        final MavenArtifact parent = parser.parse();
+        //parser.countStatistics(parent);
+        final ObjectMapper mapper = new ObjectMapper();
+        mapper.setVisibility(mapper.getSerializationConfig().getDefaultVisibilityChecker()
+                .withFieldVisibility(JsonAutoDetect.Visibility.ANY)
+                .withGetterVisibility(JsonAutoDetect.Visibility.ANY)
+                .withSetterVisibility(JsonAutoDetect.Visibility.NONE)
+                .withCreatorVisibility(JsonAutoDetect.Visibility.NONE));
+        ObjectWriter writer = mapper.writer(new DefaultPrettyPrinter());
+
+        String data = "overallProdStatsPercentage,communityDependenciesCount,productisedDependenciesCount" + System.lineSeparator() +
+                parent.getOverallProdStats() + "," + parent.getCommunityDependenciesCount() + "," + parent.getProductisedDependenciesCount();
+
+        Files.write(Paths.get("data.csv"), data.getBytes());
+
+        writer.writeValue(new File(outputFile), parent);
+    }
+
+  /*  public Statistics countStatistics(MavenArtifact artifact) {
+        if (artifact.dependencies.isEmpty()) {
+            return artifact.setStatistics(artifact.freshStatistics());
+        }
+        int sumProductizedChildren = 0, sumCommunity = 0;
+        for (MavenArtifact child : artifact.dependencies) {
+            Statistics counting = countStatistics(child);
+            sumProductizedChildren += counting.productized;
+            sumCommunity += counting.community;
+        }
+        return artifact.setStatistics(new Statistics(artifact.freshStatistics().productized + sumProductizedChildren,
+                artifact.freshStatistics().community + sumCommunity));
+    }*/
+
+    class Statistics {
+        int productized;
+        int community;
+
+        Statistics(int productized, int community) {
+            this.productized = productized;
+            this.community = community;
+        }
+    }
+
+    public MavenArtifact parse() throws IOException {
+        final List<String> lines = Files.readAllLines(dependencyTreeFile);
+        MavenArtifact parent = new MavenArtifact(prepareGav(lines.get(0)));
+        final MavenArtifact superParent = parent;
+        for (int i = 1; i < lines.size(); i++) {
+            String line = lines.get(i);
+            MavenArtifact child = new MavenArtifact(prepareGav(line));
+            child.parent = parent;
+            parent.addChild(child);
+
+            if (i < lines.size() - 1) {
+                String nextLine = lines.get(i + 1);
+                int detectedLevel = detectLevel(line);
+                int nextLineLevel = detectLevel(nextLine);
+                if (nextLineLevel > detectedLevel) { // going deeper
+                    parent = child;
+                } else if (nextLineLevel < detectedLevel) { // going up
+                    for (int j = 0; j < detectedLevel - nextLineLevel; j++) {
+                        parent = parent.parent;
+                    }
+                }
+            }
+        }
+        return superParent;
+    }
+
+    private String prepareGav(String line) {
+        return line.substring(indentationLength(line));
+    }
+
+    private int detectLevel(String line) {
+        return (indentationLength(line) / 3) - 1;
+    }
+
+    private int indentationLength(String line) {
+        final Matcher matcher = Pattern.compile("([\\\\+-\\\\| ]*)").matcher(line);
+        if (matcher.find()) {
+            return matcher.group(1).length();
+        }
+        throw new IllegalStateException("We couldn't fine indentation");
+    }
+
+    @JsonPropertyOrder({
+            "name", "groupId", "artifactId", "version", "isProductised", "overallProdStats",
+            "firstLevelCommunityArtefacts", "secondLevelCommunityArtefacts", "firstLevelProductisedArtefacts", "secondLevelProductisedArtefacts",
+            "productisedArtefacts", "communityArtefacts", "productisedDependenciesCount", "communityDependenciesCount", "dependencies"
+    })
+    class MavenArtifact {
+        private String name;
+        private String groupId;
+        private String artifactId;
+        private String version;
+
+        @JsonIgnore
+        private MavenArtifact parent;
+        private List<MavenArtifact> dependencies = new ArrayList<>();
+
+        MavenArtifact(final String gavString) {
+            final String[] gav = gavString.split(":");
+            name = gavString;
+            groupId = gav[0];
+            artifactId = gav[1];
+            version = gav[3];
+        }
+
+        public void addChild(MavenArtifact artifact) {
+            dependencies.add(artifact);
+        }
+
+        @Override
+        public String toString() {
+            return groupId + ":" + artifactId + ":" + version;
+        }
+
+        public int getProductisedDependenciesCount() {
+            if (dependencies.isEmpty()) {
+                return 0;
+            } else {
+                int counter = 0;
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (childrenDep.getIsProductised())
+                        counter++;
+                    counter += childrenDep.getProductisedDependenciesCount();
+                }
+                return counter;
+            }
+        }
+
+        public List<String> getProductisedArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                    artefacts.addAll(childrenDep.getProductisedArtefacts());
+                }
+                return artefacts;
+            }
+        }
+
+        public List<String> getCommunityArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (!childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                    artefacts.addAll(childrenDep.getCommunityArtefacts());
+                }
+                return artefacts;
+            }
+        }
+
+        public List<String> getfirstLevelProductisedArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                }
+                return artefacts;
+            }
+        }
+
+        public List<String> getsecondLevelProductisedArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                    artefacts.addAll(childrenDep.getfirstLevelProductisedArtefacts());
+                }
+                return artefacts;
+            }
+        }
+
+        public List<String> getfirstLevelCommunityArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (!childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                }
+                return artefacts;
+            }
+        }
+
+        public List<String> getsecondLevelCommunityArtefacts() {
+            if (dependencies.isEmpty()) {
+                return Collections.emptyList();
+            } else {
+                List<String> artefacts = new ArrayList<>();
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (!childrenDep.getIsProductised())
+                        artefacts.add(childrenDep.name);
+                    artefacts.addAll(childrenDep.getsecondLevelCommunityArtefacts());
+                }
+                return artefacts;
+            }
+        }
+
+        public int getCommunityDependenciesCount() {
+            if (dependencies.isEmpty()) {
+                return 0;
+            } else {
+                int counter = 0;
+                for (MavenArtifact childrenDep : dependencies)
+                {
+                    if (!childrenDep.getIsProductised())
+                        counter++;
+                    counter += childrenDep.getCommunityDependenciesCount();
+                }
+                return counter;
+            }
+        }
+
+        public double getOverallProdStats() {
+            final int communityDepsCount = getCommunityDependenciesCount();
+            final int producedDepsCount = getProductisedDependenciesCount();
+            final int all = communityDepsCount + producedDepsCount;
+            if (producedDepsCount == 0) {
+                return 0.0;
+            } else {
+                return producedDepsCount * 100 / all;
+            }
+        }
+
+        boolean getIsProductised() {
+            return version.contains("redhat");
+        }
+    }
+}
