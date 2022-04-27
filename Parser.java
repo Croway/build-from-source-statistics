@@ -30,8 +30,8 @@ public class Parser {
     }
 
     public static void main(String[] args) throws IOException {
-        final String dependencyTreeFile = "/home/federico/Work/build-from-source-statistics/input-test.txt"; //args[0];
-        final String outputFile = "/home/federico/Work/build-from-source-statistics/output-test.json"; //args[1];
+        final String dependencyTreeFile = args[0];
+        final String outputFile = args[1];
         final Parser parser = new Parser(dependencyTreeFile);
         final MavenArtifact parent = parser.parse();
         //parser.countStatistics(parent);
